@@ -12,3 +12,4 @@ Visualising and forecasting electricity consumption
 *energyUse.R*: visualise differences in energy consumption summer v winter.  
 *quarterForecast.R*: Forecasting energy consumption to end of current quarter/next quarter.  
 *energyConsumptionPresentation.pdf*: presentation of finalised project.  
+*energyConsumptionReport.rmd*: technical report for project.  
