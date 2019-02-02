@@ -1,0 +1,712 @@
+---
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_float: yes
+---
+<style type="text/css">
+body .main-container {
+  margin-left: 1%;
+  margin-right: 1%;
+  max-width: 1350px;
+}
+.jumbotron {
+    background-color: #86b0e0!important;
+    
+}
+</style>
+
+<div class="jumbotron">
+  <h1>Sub-Metering and Consumption Forecasting</h1>
+  <p>Rhys Hewer</p>
+</div>
+
+# **Executive Summary**
+
+## Objective
+
+The goal of this analysis was to work with a regional home developer to develop analytics for a new set of electrical sub-metering devices, which measure power consumption and energy usage.
+
+## Method
+
+4 business questions were identified from the perspective of the end-user:
+
+* What is using the most electricity and when?
+* How much am I spending?
+
+These questions were answered through data exploration, visualisation and descriptive statistics combined with a cost-by-time scheme taken from a UK-based energy supplier.
+
+* What is my consumption trend?
+* How much will my bill be?
+
+These questions were answered using time-series forecasting methods to forecast future energy consumption based on historical patterns.
+
+## Findings
+
+* What is my consumption trend?
+
+The analysis shows that there was an initial decrease in energy consumption between in late 2006, the start of the data, and late 2008. Since then, the energy consumption has been again rising, albeit at a slower rate. The forecast for the general trend of the subsequent 6 months is a marginal decrease in consumption of 0.1 kWh per day on average. 
+
+* What is using the most electricity and when?
+
+The water-heater/Air-conditioner submeter uses the most energy of those appliances/rooms that we can monitor. It consumes 35% of the total energy of the household or approximately £500 per year. 
+
+The average use in January is just over x2 the use of July. 
+
+* How much am I spending?
+
+For the 2 week period in question, the consumer was shown to have spent £58.63 on electricity. It was also demonstrated the times within an average day at which the electricity was used and the cost of electricity at those times.
+
+* How much will my bill be?
+
+As real-time data is not available, the 'current' quarter is considered as Q4 2010 with 'today's date' being modelled as 20 Oct 2010. As such, forecasts for the 'current' quarter will be for Q4 2010 and for the 'next' quarter will be Q1 2011.
+
+The estimated bill for the 'current' quarter is £415.92. This is formed from the actual costs of the period 1 Oct 2010 - 19 Oct 2010 and the predicted costs for period 20 Oct 2010 - 31 Dec 2010.
+
+The estimated bill for the 'next' quarter is £417.29. This is formed entirely from the forecast for the period 1 Jan 2011 - 31 Mar 2011.
+
+## Recommendations
+
+* To convert consumption trend, previous 14 day spending and visualisation and current/next quarter forecast values to a dashboard for easy consumer review.
+
+* To dive deeper into analysing the high-energy consuming appliances to ascertain if these are performing poorly (i.e. appliance analysis over time) or if it is possible to recommend their use at a less expensive time of day.
+
+
+# **Data Processing**
+
+```{r message=FALSE} 
+#load libraries
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(ggfortify)
+library(tsoutliers)
+library(imputeTS)
+library(gridExtra)
+library(grid)
+library(forecast)
+library(urca)
+library(kableExtra)
+```
+
+```{r message=FALSE, results = "hide", warning=FALSE, cache = TRUE}
+#load data (separated by ;)
+data <- read_csv2("C:/Users/rhysh/Google Drive/Data Science/Ubiqum/Project 4/Task 1/data/household_power_consumption.txt")
+```
+
+The data is retrieved from: http://archive.ics.uci.edu/ml/datasets/Individual+household+electric+power+consumption
+
+The data contains measurements of electric power consumption in one household with a one-minute sampling rate over a period of almost 4 years. Different electrical quantities and some sub-metering values are available.
+
+* Sub_metering_1: energy sub-metering No. 1 (in watt-hour of active energy). It corresponds to the kitchen, containing mainly a dishwasher, an oven and a microwave (hot plates are not electric but gas powered). 
+* Sub_metering_2: energy sub-metering No. 2 (in watt-hour of active energy). It corresponds to the laundry room, containing a washing-machine, a tumble-drier, a refrigerator and a light. 
+* Sub_metering_3: energy sub-metering No. 3 (in watt-hour of active energy). It corresponds to an electric water-heater and an air-conditioner.
+* (global_active_power*1000/60 - sub_metering_1 - sub_metering_2 - sub_metering_3) represents the active energy consumed every minute (in watt hour) in the household by electrical equipment not measured in sub-meterings 1, 2 and 3. 
+
+
+```{r message=FALSE, results = "hide", warning=FALSE}
+#########Structural EDA############
+
+#Change data types [1:2] time, [3:9] time series
+dData <- data[,1:2]
+dData$datetime <- paste(dData$Date, dData$Time, sep = " ")
+dData$datetime <- dData$datetime %>% dmy_hms()
+dData$Date <- dData$Date %>% dmy()
+
+numData <- data[,3:9]
+numData <- numData %>% sapply(as.numeric) %>% as.data.frame()
+
+#Recombine type-amended datasets (still containing NAs)
+comData <- bind_cols(dData, numData)
+
+#Add year, month, day fields to allow easier subsetting
+comData <- comData %>% mutate(year = year(datetime), month = month(datetime), day = day(datetime))
+
+```
+
+The first steps of data processing are to create a datetime feature by combining the date and time columns and transforming them to date classes. The remaining features are converted to numeric classes. Further date features of year, month and day are created to allow easier future subsetting.
+
+```{r message=FALSE, results = "hide", warning=FALSE}
+###############NA ISSUES################################ 
+#Collate NAs (1440mins = 24hrs) (data period  2006-12-16 17:24:00 - 2010-11-26 21:02:00)
+NAident <- comData[!complete.cases(comData),]
+NAident <- NAident %>% group_by(Date) %>%
+        summarise(total = n())
+NAident$Date <- NAident$Date %>% dmy()
+
+majNA <- NAident %>% filter(total >= 1200) # more than 20 hours blank
+midNA <- NAident %>% filter(total > 60 & total < 1200) #between 1-20 hours blank
+minNA <- NAident %>% filter(total <60) # less than 1 hour
+
+
+#Subset 2 month period in 2010 with NA, subset same period in 2008 (fewer NAs) for comparison
+#Show daily average to allow clearer plotting.
+impFilt10 <- comData %>% filter(datetime > "2010-06-01" & datetime < "2010-07-30")
+impFilt08 <- comData %>% filter(datetime > "2008-06-01" & datetime < "2008-07-30")
+impFiltConv10 <- impFilt10 %>% group_by(Date) %>% summarise(S3 = mean(Sub_metering_3))
+impFiltConv08 <- impFilt08 %>% group_by(Date) %>% summarise(S3 = mean(Sub_metering_3))
+
+```
+
+The data contains approximately 1.25% missing values. Reviewing the distribution of the NAs there is seemingly no pattern or systematic loss of data. Time series analysis is served better by having no missing data so missing data will be imputed using <code>na.interpolation</code> function.
+
+```{r}
+#Imputation 
+tsS3impFilt10 <- ts(impFilt10$Sub_metering_3)
+tsS3impFilt10 <- tsS3impFilt10 %>% na.interpolation(option = "linear")
+
+#addition to dataframe + summary
+impFilt10$S3 <- tsS3impFilt10
+impConv10 <- impFilt10 %>% group_by(Date) %>% summarise(S3 = mean(S3))
+
+#comparison plotting
+g.NATSplot10 <- ggplot(impFiltConv10, aes(Date, S3))+
+        geom_line()
+
+g.NAimp10 <- ggplot()+
+        geom_line(data = impConv10, aes(Date, S3), colour = "red")+
+        geom_line(data = impFiltConv10, aes(Date, S3))
+
+
+grid.arrange(g.NAimp10, g.NATSplot10)
+
+```
+
+Before committing to imputing the missing values for the entire dataset, a test will be done on a 2 month subset of the data. Plotting the imputed data against the original missing data no extreme behaviours are observed. It is appropriate to continue with wider imputation.
+
+```{r results = "hide"}
+#################IMPUTATION of NAs#######################
+preImp <- comData
+
+preImp[4:10] <- preImp[4:10] %>% sapply(ts)
+preImp[4:10] <- preImp[4:10] %>% sapply(function(x) na.interpolation(x, option = "linear"))
+
+
+##check if correct
+impCheck <- comData$Sub_metering_3 %>% as.data.frame() %>% cbind(preImp$Sub_metering_3)
+impCheckCC <- impCheck %>% filter(complete.cases(impCheck))
+identical(impCheckCC$., impCheckCC$`preImp$Sub_metering_3`) # pre-existing values are the same = no errors due to imputation
+impCheck <- impCheck %>% filter(!complete.cases(impCheck))
+
+#####POST-IMPUTATION CLEAN UP###############
+impData <- preImp
+```
+
+```{r}
+#######FEATURE ENGINEERING###########
+#(global_active_power*1000/60 - sub_metering_1 - sub_metering_2 - sub_metering_3) - missing energy metering
+
+impData$sm4 <- (impData$Global_active_power*1000/60) - 
+        (impData$Sub_metering_1 + impData$Sub_metering_2 + impData$Sub_metering_3)
+
+impData$totkwh = impData$Sub_metering_1 + impData$Sub_metering_2 + impData$Sub_metering_3 + impData$sm4
+
+#arrange columns in more logical order
+impData <- impData %>% select(year, month, day, Date, Time,  datetime, Global_active_power, Global_reactive_power, Voltage, Global_intensity,
+                              Sub_metering_1, Sub_metering_2, Sub_metering_3, sm4, totkwh)
+
+#Give columns more useable names
+impData <- impData %>% rename(sm1 = Sub_metering_1, sm2 = Sub_metering_2, sm3 = Sub_metering_3, kwhpm = totkwh)
+
+
+#convert watt-hour values to kilowatt-hour values (prices usually given in kwh)
+impData[11:15] <- impData[11:15]/1000
+
+#check that kwh usage per day is reasonable (26 = high/large household)
+dayUse <- impData %>% group_by(Date) %>% summarise(dayKWH = sum(kwhpm))
+dayAvg <- mean(dayUse$dayKWH)
+
+```
+
+As noted in the Machine Learning Repository page for this dataset, the sub-meters do not represent the total power consumption for the house. As such, a further feature has been engineered which is the difference between the total power consumption and the sub-total consumption of sub-meters 1-3. This feature has been called sm4 (sub-meter 4).
+
+```{r results = "hide"}
+#############################ADDING TIME OF DAY COSTS####################################
+
+timeData <- impData
+timeData$weekday <- timeData$datetime %>% wday(label = T, abbr = F) 
+timeData$hour <- timeData$datetime %>% hour() 
+
+timeData <- timeData %>% select(weekday, hour, everything())
+timeData$timecost <- NA
+
+##Weekend Low - 7.91
+timeData[(timeData$weekday == "Saturday" | timeData$weekday == "Sunday") & 
+                         (timeData$hour >= 0 & timeData$hour < 7),]$timecost <- 7.91
+
+##Weekend Standard - 16.27
+timeData[(timeData$weekday == "Saturday" | timeData$weekday == "Sunday") & 
+                 (timeData$hour <= 23 & timeData$hour >= 7),]$timecost <- 16.27
+
+
+#weekday low - 7.91
+timeData[(timeData$weekday != "Saturday" & timeData$weekday != "Sunday") & 
+                 (timeData$hour >= 0 & timeData$hour < 7),]$timecost <- 7.91
+
+#weekday standard - 16.27
+timeData[(timeData$weekday != "Saturday" & timeData$weekday != "Sunday") & 
+                 (timeData$hour >= 7 & timeData$hour < 16),]$timecost <- 16.27
+
+#weekday high - 32.55
+timeData[(timeData$weekday != "Saturday" & timeData$weekday != "Sunday") & 
+                 (timeData$hour >= 16 & timeData$hour < 20),]$timecost <- 32.55
+
+#weeknight - 16.27
+timeData[(timeData$weekday != "Saturday" & timeData$weekday != "Sunday") & 
+                 (timeData$hour >= 20 & timeData$hour <= 23),]$timecost <- 7.91
+
+
+#Check correctly inserted
+sum(is.na(timeData$timecost)) # 0 NA
+timeCheck <- timeData %>% group_by(weekday, hour) %>% summarise(mean = mean(timecost)) # averages correspond with costs
+timeData$cost <- (timeData$kwhpm*timeData$timecost)/100 #convert to units of £
+```
+
+To allow more granular exploration of energy costs based on the time-of-day, illustrative costs were added to the data from the following source: https://www.greenenergyuk.com/Tide
+
+
+```{r}
+#########OUTLIERS########       
+
+outSm1 <- tsoutliers(timeData$sm1) #31%
+outSm2 <- tsoutliers(timeData$sm2) #3.3%
+outSm3 <- tsoutliers(timeData$sm3) #none
+
+```
+
+Outliers were reviewed and numerous were identified using Tukey's 1.5 x IQR method. Due to the high number identified as outliers (e.g 31% of sm1 readings) it was decided to leave these in situ.
+
+```{r}
+##########ADDING WEEKS##################
+timeData$week <- timeData$datetime %>% week()
+timeData <- timeData %>% select(year, month, week, day, weekday, hour, everything())
+
+###########ADDING QUARTERS#########     
+timeData$quarter <- timeData$datetime %>% quarter(with_year = TRUE)
+timeData <- timeData %>% select(year, quarter, everything())
+
+```
+
+Following some initial data exploration, additional date features for weeks and quarters were added to allow convenient subsetting.
+
+
+# **Analysis**
+
+## **What is my consumption trend?**
+
+This question relates to the general trend in energy consumption in the household over the entire period of measurement and a prediction for the subsequent 6 months.
+
+
+```{r}
+#total period by months
+conData <- timeData %>% group_by(year, month) %>% 
+        summarise(monthAvg = mean(kwhpm)*60*24) # per month average kwh per day
+
+TSconData <- conData$monthAvg %>% ts(frequency = 12, start = c(2006,12))
+
+#decompose to find trend
+conDec <- stl(TSconData, "periodic")
+plot(conDec)
+conDec_trend <- conDec$time.series[,2]
+```
+
+Summarising the data into a per-month average of kWh used per day, decomposing the data into trend and seasonality and focussing on the trend pattern, it can be seen that after an initial decrease in energy consumption between the start of the data and late 2008 the energy consumption has been again rising, albeit at a slower rate.
+
+```{r}
+####forecast next 6 months
+
+#Training set
+conDecTrain <- conDec_trend[1:42] %>% ts(frequency = 12, start = c(2006,12))
+
+```
+
+In order to forecast the expected trend for the 6 months following the end of the data a forecasting model will be deployed, the first step of which is to split the data into a training portion to allow model development.
+
+### Trend models {.tabset}
+#### Quadratic Linear Regression
+```{r}
+#Linear regression - quadratic
+conMod.q <- tslm(conDecTrain ~ trend + I(trend^2))
+conFit.q <- forecast(conMod.q, h = 6)
+autoplot(conFit.q) + autolayer(fitted(conFit.q)) + autolayer(conDec_trend) 
+checkresiduals(conFit.q)
+accuracy(conFit.q, conDec_trend)
+```
+
+The first model tried is a quadratic linear regression. A simple visual review of the model fitting against the existing data shows that the equation is performing poorly. Reviewing the residuals, the ACF plot shows both a pattern and that information lies outside the significance boundaries, suggesting that there is information not captured by the model.
+
+In addition, the Ljung-Box test shows that the residuals are not white-noise, suggesting that information remains in the residuals which should be included in the model.
+
+Finally, the RMSE is 0.91 which, against the scale of values between 25-30 is satisfactory.
+
+#### Exponential Smoothing
+```{r}
+#Exponential smoothing
+conMod.h <- ets(conDecTrain)
+conFit.h <- forecast(conMod.h, h = 6)
+autoplot(conFit.h) + autolayer(fitted(conFit.h)) + autolayer(conDec_trend)
+checkresiduals(conFit.h)
+accuracy(conFit.h, conDec_trend)
+```
+
+The second model is an exponential smoothing model using the <code>ets</code> function to define the (E)rror (T)rend and (S)easonality of the model. A visual review shows that the prediction is coherent with the data. Considering the residuals, we see that the ACF shows that there is a possible marginal exclusion of information which is supported by the Ljung-Box test showing that the residuals are not white noise.
+
+The RMSE of 0.008 is satisfactory.
+
+#### Arima
+```{r}
+#arima
+conMod.a <- auto.arima(conDecTrain)
+conFit.a <- forecast(conMod.a, h = 6)
+autoplot(conFit.a) + autolayer(fitted(conFit.a)) + autolayer(conDec_trend)
+checkresiduals(conFit.a)
+accuracy(conFit.a, conDec_trend)
+```
+
+The third model is an non-seasonal arima(0,2,0) model chosen automatically using the <code>auto.arima</code> function.
+
+A visual review shows that the prediction is coherent with the data. Considering the residuals, we see that the ACF shows that there is a possible marginal exclusion of information. The Ljung-Box test, however, shows that the residuals are white noise.
+
+The RMSE of 0.01 is satisfactory.
+
+### Modelling Conclusion
+
+The Arima model with the white noise residuals and satisfactory RMSE is to be used to model the subsequent 6 month trend.
+
+```{r}
+#best model - arima: apply to complete data
+conModFin.h <- auto.arima(conDec_trend)
+conFitFin.h <- forecast(conModFin.h, h = 6)
+autoplot(conFitFin.h)
+```
+
+The forecast shows a marginal decrease in the consumption trend expected in the subsequent 6 months.
+
+## **What is using most electricity and when?**
+
+This question is in relation to which appliances/rooms are using the most electricity and at what point that takes place. To answer this question, a 1 year sample of data will be taken and an illustrative winter period and summer period will be examined to look for peak energy consumption within the sub-meters.
+
+```{r}
+#extract sum2009-sum2010
+dayZone<- timeData %>% filter(Date >= "2009-07-01" & Date <= "2010-06-30")
+
+#create minute feature and collect into 15 min chunks
+dayZone$quarter <- NA
+dayZone <- dayZone %>% mutate(minute = minute(datetime)) %>% 
+        select(weekday, minute, hour, quarter, everything())
+
+
+dayZone[(dayZone$minute >= 0 & dayZone$minute < 15),]$quarter <- 1
+dayZone[(dayZone$minute >= 15 & dayZone$minute < 30),]$quarter <- 2
+dayZone[(dayZone$minute >= 30 & dayZone$minute < 45),]$quarter <- 3
+dayZone[(dayZone$minute >= 45 & dayZone$minute <= 59),]$quarter <- 4
+```
+
+The data is collected into 15 minute chunks in order to allow a more granular examination of energy patterns accross an averaged 24 hour period. 
+
+```{r}
+#plot day average pattern for 2009 - Jan, July
+#Jan 2010
+dayZoneJan <- dayZone %>% filter(month == 1) %>%
+        group_by(hour, quarter) %>% 
+        summarise(sm1 = mean(sm1), sm2 = mean(sm2), sm3 = mean(sm3), sm4 = mean(sm4))
+
+dayZoneJan.long <- dayZoneJan %>% gather("sm1", "sm2", "sm3", "sm4", key = "sm", value = "avgKwhpm")
+
+dayZoneJan.long$time <- paste(dayZoneJan.long$hour, dayZoneJan.long$quarter, sep = ".") %>% as.numeric()
+
+
+
+g.jan10 <- ggplot(dayZoneJan.long, aes(time, avgKwhpm, group = sm, colour = sm)) +
+        geom_line()+ 
+        theme_bw() +
+        theme(axis.text.x=element_text(angle=90, hjust=1)) +
+        ylab("Average kWh per minute") + 
+        xlab("Time of Day") + 
+        ggtitle("Average kWh by time of day Jan 2010") +
+        scale_color_discrete(labels = c("Kitchen", "Laundry", "Water/Air", "Rest")) +
+        coord_cartesian(ylim = c(0,0.03))
+
+
+#July 2009
+dayZoneJul <- dayZone %>% filter(month == 7) %>%
+        group_by(hour, quarter) %>% 
+        summarise(sm1 = mean(sm1), sm2 = mean(sm2), sm3 = mean(sm3), sm4 = mean(sm4))
+
+dayZoneJul.long <- dayZoneJul %>% gather("sm1", "sm2", "sm3", "sm4", key = "sm", value = "avgKwhpm")
+
+dayZoneJul.long$time <- paste(dayZoneJul.long$hour, dayZoneJul.long$quarter, sep = ".") %>% as.numeric()
+
+
+
+g.jul09 <- ggplot(dayZoneJul.long, aes(time, avgKwhpm, group = sm, colour = sm)) +
+        geom_line()+ 
+        theme_bw() +
+        theme(axis.text.x=element_text(angle=90, hjust=1)) +
+        ylab("Average kWh per minute") + 
+        xlab("Time of Day") + 
+        ggtitle("Average kWh by time of day Jul 2009") +
+        scale_color_discrete(labels = c("Kitchen", "Laundry", "Water/Air", "Rest")) +
+        coord_cartesian(ylim = c(0,0.03))
+
+
+#compare
+grid.arrange(g.jan10, g.jul09)
+```
+
+There is a clear increase in usage in the winter month compared to the summer month. The area which shows the overall highest use is that of the unmetered sections of the house. This means that we cannot speak confidently of which particular appliance uses the *most* energy. It is possible, however, to comment on the sub-metered area which uses the most energy: sub-meter 3 - an electric water-heater and an air-conditioner.
+
+## **How much am I spending?**
+
+This question relates to giving the customer a snapshot of recent energy consumption patterns, costs and energy prices at the time of use.
+
+```{r}
+#date split/cost of use
+last14 <- timeData %>% filter(Date >= "2010-03-11" & Date < "2010-03-24")
+useCost <- sum(last14$cost)
+
+useDemo <- last14 %>% group_by(hour) %>% summarise(use = mean(kwhpm)*60, cost = mean(cost), timecost = mean(timecost))
+
+#daily use graph
+g.dayUse <- ggplot(useDemo, aes(hour, use)) +
+        geom_line() +
+        theme_bw() +
+        ylab("Kilowatt Hours") + 
+        ggtitle("Hourly Energy Use (14 day avg) & Energy Cost per Hour (pence)") +
+        theme(axis.title.x = element_blank(), axis.text.x = element_blank()) +
+        coord_cartesian(xlim = c(0,23))
+
+
+g.timecost <- ggplot(useDemo, aes(hour, timecost, fill = timecost)) +
+        geom_col() +
+        scale_fill_gradient(low = "#E8BBC1", high = "#E71D36", guide=FALSE) +
+        theme_bw() +
+        ylab("Cost per Kilowatt Hour") + 
+        xlab("Time (Hour of Day)") +
+        coord_cartesian(xlim = c(0,23))
+
+
+
+grid.newpage()
+grid.draw(rbind(ggplotGrob(g.dayUse), ggplotGrob(g.timecost), size = "first"))
+
+
+```
+
+
+Taking a 14 day consumption period and averaging the use by hour of the day, it is possible to show the pattern of electricity consumption over an averaged 24 hour period. We see a pattern of low consumption in the night, increased consumption in the morning through afternoon and peak consumption in the evening. This is plotted against the average cost of energy to allow the consumer to visualise how much the electricity is costing at certain times of the day.
+By summing the minute-by-minute cost of the associated period a figure of £58.63 can be reached for the cost of electricity for this 2 week period.
+
+## **How much will my bill be?**
+
+This question is related to predicting future bills. The assumption is made that the bills will be generated on a quarterly basis. The prediction will seek to combine the actual to-date consumption of the current quarter with the forecasted consumption for the remainder of the quarter to give an estimated bill for the current quarter.
+
+The estimated bill for the next quarter will be derived exclusively from the forecasted consumption of that period.
+
+As the time remaining in the current quarter could vary from a quarter/week/month/day it was decided to forecast on a daily basis to capture all possible remaining time within a quarter.
+
+As real-time data is not available, the 'current' quarter is considered as Q4 2010 with 'today's date' being modelled as 20 Oct 2010. As such, forecasts for the 'current' quarter will be for Q4 2010 and for the 'next' quarter will be Q1 2011.
+
+### Data Selection
+```{r}
+#Averaged daily data for prediction
+qTime <- timeData %>% filter(quarter >= "2008.2" & quarter < "2010.4")
+qTimeDay <- qTime %>% group_by(Date) %>% summarise(avgKwhpD = mean(kwhpm)*60*24, timecost = mean(timecost))
+qTimeDay$poundCost <- (qTimeDay$avgKwhpD * qTimeDay$timecost)/100
+TSqTimeDay <- qTimeDay$avgKwhpD %>% ts(start = c(2008, 92), frequency = 365.25)
+```
+
+The data contains yearly seasonality which would impact the prediction. As such, at least 2 seasons are required to identify trend. This means that a minimum 2 year period of data is required.
+
+The data is subsetted to Q2 2008 - Q4 2010 to allow a 2 year period training-set and a 2 quarter test-set (equal length to maximum possible forecast horizon). The data is grouped by day and the average kWh per minute per day multiplied to give an average kWh per day feature which is subsequently converted to a time-series object with a yearly seasonality (frequency 365.25).
+
+### Data Splitting & Forecast Horizon
+```{r}
+#work out horizon to end of next quarter
+fcHor1 <- qTime$Date %>% tail(1)
+fcHor2 <- "2010-05-12" %>% ymd() # fake "today"
+fcHor <- interval(fcHor2,fcHor1) %>% as.duration()/(60*60*24) 
+fcHor <- fcHor %>% as.numeric() %>% +1 #+1 to include today's date in prediction
+
+#split to test/train
+testPeriodEnd <- length(TSqTimeDay)
+testPeriodStart <- length(TSqTimeDay) - (fcHor-1)
+qTest <- TSqTimeDay[testPeriodStart:testPeriodEnd]
+qTrain <- TSqTimeDay[1:(testPeriodStart-1)] %>% ts(start = c(2008, 92), frequency = 365.25)
+
+```
+
+For the purposes of developing a model, it us necessary to split the existing data into training and test sets. To model a partial current quarter and full next quarter I have taken a date of 12 May 2010 to split the test/train sets. This date was chosen as Q3 2010 is the final full quarter of data available, requiring a date in Q2 to be chosen to model a partial current quarter, allowing Q3 2010 to be fully modelled in the test set. 
+
+The forecast horizon for model development was taken as the difference between 12 May 2010 and the last day of data (26 Nov 2010).
+
+### Data Decomposition
+
+#### Standard Decomposition
+```{r}
+##decompose to look for trend/seasonality - allows better model choice
+qDec <- stl(qTrain, "periodic")
+autoplot(qDec) # shows both trend and seasonality
+```
+
+#### Multi-Seasonal Decomposition
+```{r}
+qDecM <- mstl(qTrain)
+autoplot(qDecM) # no seasonality beyond annual
+```
+
+To assist in choosing models for the initial modelling exploration, the data is decomposed, both with a standard decomposition and with a multi-seasonal decomposition. The decompositions show that only an annual seasonality is detected. As such, models which are able to process trend, seasonality and a high frequency (above 52) are required.
+
+### Model Development {.tabset}
+
+#### Seasonal Naive
+```{r warning= FALSE}
+#seasonal naive
+qFit.sn <- snaive(qTrain, h = fcHor)
+autoplot(qFit.sn) + autolayer(fitted(qFit.sn)) + autolayer(TSqTimeDay)
+checkresiduals(qFit.sn)
+acc.sn <- accuracy(qFit.sn, qTest)
+
+kable(acc.sn) %>%
+        kable_styling(bootstrap_options = "striped", full_width = F, position = "left")
+```
+
+The Seasonal Naive model simply forecasts by taking the existing value for the same period in the previous season. In this case, the same day of the previous year.
+
+A simple visual review of the model fitting against the existing data shows that the equation is performing reasonably well. Reviewing the residuals shows that these are not white noise and that some patterns remain in the ACF plot.
+
+The RMSE of 7.05 against a mean kWh of 25.8 is substantial.
+
+#### Linear Regression
+```{r warning= FALSE}
+#linear regression
+qMod.reg <- tslm(qTrain ~ season + trend)
+qFit.reg <- forecast(qMod.reg, h = fcHor)
+autoplot(qFit.reg) + autolayer(fitted(qFit.reg)) + autolayer(TSqTimeDay)
+checkresiduals(qFit.reg)
+acc.reg <- accuracy(qFit.reg, qTest)
+
+kable(acc.reg) %>%
+        kable_styling(bootstrap_options = "striped", full_width = F, position = "left")
+```
+
+This forecast is created by using the trend and seasonality in a linear regression model. The model has simply taken the values from 2 years prior and, in this case, is acting like a bi-annual naive model. As the fitted values match the data exactly there are no residuals, which eliminates a source of analysis and makes the model less attractive.
+
+The RMSE of 8.41 against a mean kWh of 25.8 is substantial.
+
+#### Arima
+```{r warning= FALSE}
+#STL/Arima
+qMod.st <- stlm(qTrain, method = "arima") 
+qFit.st <- forecast(qMod.st, h = fcHor)
+autoplot(qFit.st) + autolayer(fitted(qFit.st)) + autolayer(TSqTimeDay)
+checkresiduals(qFit.st)
+acc.st <- accuracy(qFit.st, qTest)
+
+kable(acc.st) %>%
+        kable_styling(bootstrap_options = "striped", full_width = F, position = "left")
+```
+
+The STL/Arima model works by de-seasonalising the data, applying the Arima model then re-introducing the seasonality. The Arima model forms a regression model against previous values of the data and applies a moving average to these.
+
+A visual review shows that the prediction seems reasonably coherent with the data. Reviewing the residuals shows that these are not white noise and that some patterns remain in the ACF plot.
+
+The RMSE of 6.66 against a mean kWh of 25.8 is substantial.
+
+### Modelling Metric Comparison
+```{r}
+#compare accuracy:
+accComp <- acc.sn %>% as.data.frame()
+accComp <- accComp %>% rbind(acc.reg, acc.st)
+accComp <- accComp %>% rownames_to_column()
+accComp$Model <- c("snTrain", "snTest", "regTrain", "regTest", "arTrain", "arTest")
+accComp$rowname <- NULL
+accComp <- accComp %>% select(Model, everything())
+
+kable(accComp) %>%
+        kable_styling(bootstrap_options = "striped", full_width = F, position = "left")
+```
+
+Comparing the model metrics, particularly the RMSE of the test set, we see that the STL/Arima model performs best. This model will be taken forward into forecasting.
+
+### Forecasting
+```{r}
+#work out horizon to end of next quarter (q1, 2011)
+finalHor1 <- "2011-03-31" %>% ymd() #end of next quarter
+finalHor2 <- "2010-10-20" %>% ymd() # fake "today"
+finalHor <- interval(finalHor2,finalHor1) %>% as.duration()/(60*60*24) 
+finalHor <- finalHor %>% as.numeric() %>% +1 #+1 to include today's date in prediction         
+
+#adjust time series to run until 'today' (20 Oct 2010)
+qTimeFinal <- timeData %>% filter(quarter >= "2008.2" & quarter <= "2010.4")
+qTimeDayFinal <- qTimeFinal %>% group_by(Date) %>% summarise(avgKwhpD = mean(kwhpm)*60*24, timecost = mean(timecost))
+qTimeDayFinal$poundCost <- (qTimeDayFinal$avgKwhpD * qTimeDayFinal$timecost)/100
+TStime <- qTimeDayFinal$avgKwhpD
+TSfinal <- TStime[1:932] %>% ts(start = c(2008, 92), frequency = 365.25)
+
+#Using STL/Arima model and full dataset (q2,2008- q4, 2010)       
+qMod.final <- stlm(TSfinal, method = "arima") 
+qFit.final <- forecast(qMod.final, h = finalHor)
+autoplot(qFit.final)
+```
+
+The forecast appears to be coherent with the historical data.
+
+```{r}
+#fortify to DF + add date column
+qFit <- qFit.final %>% fortify()
+qFit <- qFit %>% rename(avgKwhpD = Data, preds = 'Point Forecast')
+qFit$date <- seq(from = as.Date("2008-04-01"), to = as.Date(finalHor1), by = 'day')
+
+#monetise predictions (combine actual and predictions into one column and multiply by average kWh cost)
+avgKwh <- mean(qTimeDay$timecost)
+qFit$cost <- rowSums(qFit[,c("avgKwhpD", "preds")]*avgKwh/100, na.rm = TRUE)
+qCurr <- qFit %>% filter(date >= "2010-10-01" & date <= "2010-12-31")
+qCurrCost <- sum(qCurr$cost)
+qNxt <- qFit %>% filter(date >= "2011-01-01" & date <= "2011-03-31")
+qNxtCost <- sum(qNxt$cost)
+```
+
+The estimated bill for the current quarter is £415.92. This is formed from the actual costs of the period 1 Oct 2010 - 19 Oct 2010 and the predicted costs for period 20 Oct 2010 - 31 Dec 2010.
+
+The estimated bill for the next quarter is £417.29. This is formed entirely from the forecast for the period 1 Jan 2011 - 31 Mar 2011.
+
+
+# **Conclusions**
+
+## Results
+
+Four questions were posed and answered in this analysis:
+
+* What is my consumption trend?
+
+The analysis shows that there was an initial decrease in energy consumption between in late 2006, the start of the data, and late 2008. Since then, the energy consumption has been again rising, albeit at a slower rate. The forecast for the general trend of the subsequent 6 months is a marginal decrease in consumption of 0.1 kWh per day on average. 
+
+* What is using the most electricity and when?
+
+The water-heater/Air-conditioner submeter uses the most energy of those appliances/rooms that we can monitor. It consumes 35% of the total energy of the household or approximately £500 per year. 
+
+The average use in January is just over x2 the use of July. 
+
+* How much am I spending?
+
+For the 2 week period in question, the consumer was shown to have spent £58.63 on electricity. It was also demonstrated the times within an average day at which the electricity was used and the cost of electricity at those times.
+
+* How much will my bill be?
+
+As real-time data is not available, the 'current' quarter is considered as Q4 2010 with 'today's date' being modelled as 20 Oct 2010. As such, forecasts for the 'current' quarter will be for Q4 2010 and for the 'next' quarter will be Q1 2011.
+
+The estimated bill for the 'current' quarter is £415.92. This is formed from the actual costs of the period 1 Oct 2010 - 19 Oct 2010 and the predicted costs for period 20 Oct 2010 - 31 Dec 2010.
+
+The estimated bill for the 'next' quarter is £417.29. This is formed entirely from the forecast for the period 1 Jan 2011 - 31 Mar 2011.
+
+## Recommendations
+
+* To convert consumption trend, previous 14 day spending and visualisation and current/next quarter forecast values to a dashboard for easy consumer review.
+
+* To dive deeper into analysing the high-energy consuming appliances to ascertain if these are performing poorly (i.e. appliance analysis over time) or if it is possible to recommend their use at a less expensive time of day.
+
+
