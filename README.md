@@ -6,7 +6,7 @@ Visualising and forecasting electricity consumption
 
 **Files**:  
 *libraries.R*: library script.  
-*dataprocessing.R*: data preprocessing and feature engineering.
+*dataprocessing.R*: data preprocessing and feature engineering.  
 *trendForecast.R*: forecasting energy consumption trend for following 6 months.  
 *energySpending.R*: 14 day energy costs & visualisation.  
 *energyUse.R*: visualise differences in energy consumption summer v winter.  
